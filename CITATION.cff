@@ -12,6 +12,12 @@ authors:
     given-names: Gabriel
     affiliation: "Multiscale and Multiphysics Mechanics Group (M2M), Department of Civil Engineering and Computer Science Engineering, University of Rome Tor Vergata, Rome, Italy"
 
+  - family-names: Marino
+    given-names: Michele
+    affiliation: "Multiscale and Multiphysics Mechanics Group (M2M), Department of Civil Engineering and Computer Science Engineering, University of Rome Tor Vergata, Rome, Italy"
+    orcid: "https://orcid.org/0000-0002-4323-3061"
+
+
 license: MIT
 repository-code: "https://github.com/multi2mech/SIMBA"
 url: "https://github.com/multi2mech/SIMBA"

@@ -157,7 +157,7 @@ https://github.com/mastroalex/Blender2SIMBA
 If you use **SIMBA** in academic research, scientific publications, or other scholarly work, please cite this software.
 
 ```text
-Mastrofini A., Boezi G.
+Mastrofini A., Boezi G., Marino M.
 
 SIMBA — SIMulation Buffered Animation:
 A Unity framework for animated scientific simulations.
