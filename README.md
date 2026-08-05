@@ -154,10 +154,20 @@ https://github.com/mastroalex/Blender2SIMBA
 
 # Citation
 
-If you use SIMBA in academic work, please cite:
+If you use **SIMBA** in academic research, scientific publications, or other scholarly work, please cite this software.
 
-```
-SIMBA — Simulation Buffered Animation
+```text
+Mastrofini A., Boezi G.
+
+SIMBA — SIMulation Buffered Animation:
 A Unity framework for animated scientific simulations.
+
+Multiscale and Multiphysics Mechanics Group (M2M)
+Department of Civil Engineering and Computer Science Engineering
+University of Rome Tor Vergata
+Rome, Italy
+
+https://github.com/multi2mech/SIMBA
 ```
 
+A `CITATION.cff` file is included in this repository for automatic citation support on GitHub.

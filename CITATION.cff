@@ -1,7 +1,37 @@
-cff-version: 1.0.0
-title: SIMBA
-message: Please cite this repository if you use SIMBA in academic work.
+cff-version: 1.2.0
+title: "SIMBA"
+message: "If you use SIMBA in academic work, please cite this software."
+type: software
 authors:
   - family-names: Mastrofini
     given-names: Alessandro
+    affiliation: "Multiscale and Multiphysics Mechanics Group (M2M), Department of Civil Engineering and Computer Science Engineering, University of Rome Tor Vergata, Rome, Italy"
+    orcid: "https://orcid.org/0009-0004-2212-698X"
+
+  - family-names: Boezi
+    given-names: Gabriel
+    affiliation: "Multiscale and Multiphysics Mechanics Group (M2M), Department of Civil Engineering and Computer Science Engineering, University of Rome Tor Vergata, Rome, Italy"
+
 license: MIT
+repository-code: "https://github.com/multi2mech/SIMBA"
+url: "https://github.com/multi2mech/SIMBA"
+repository-artifact: "https://github.com/multi2mech/SIMBA/releases"
+abstract: >
+  SIMBA (SIMulation Buffered Animation) is an open-source Unity framework
+  for interactive visualization of animated scientific simulations.
+  It supports dynamic topology, animated scalar fields, efficient binary
+  storage, and GPU-accelerated rendering for scientific and engineering
+  applications.
+
+keywords:
+  - Unity
+  - Scientific Visualization
+  - Simulation
+  - Finite Element Method
+  - Geometry Nodes
+  - Biomedical Engineering
+  - Computer Graphics
+  - Animation
+
+version: "1.1.0"
+date-released: "2026-08-05"
