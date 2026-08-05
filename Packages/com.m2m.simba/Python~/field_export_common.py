@@ -72,40 +72,13 @@ def sanitize_field(values: np.ndarray, frame_count: int, value_count: int, name:
     return np.ascontiguousarray(np.stack(rows), dtype=np.float32)
 
 
-def field_stats(field):
+def field_stats(field: FieldBlock):
     frames = field.frames()
-
-    frame_min = np.empty(len(frames), dtype=np.float32)
-    frame_max = np.empty(len(frames), dtype=np.float32)
-
-    valid_min = []
-    valid_max = []
-
-    for i, values in enumerate(frames):
-        values = np.asarray(values, dtype=np.float32)
-
-        if values.size == 0:
-            frame_min[i] = np.nan
-            frame_max[i] = np.nan
-            continue
-
-        mn = float(values.min())
-        mx = float(values.max())
-
-        frame_min[i] = mn
-        frame_max[i] = mx
-
-        valid_min.append(mn)
-        valid_max.append(mx)
-
-    if len(valid_min) == 0:
-        global_min = 0.0
-        global_max = 0.0
-    else:
-        global_min = min(valid_min)
-        global_max = max(valid_max)
-
-    return global_min, global_max, frame_min, frame_max
+    if not frames:
+        raise ValueError(f'{field.name}: no frames')
+    frame_min = np.asarray([float(v.min()) for v in frames], dtype=np.float32)
+    frame_max = np.asarray([float(v.max()) for v in frames], dtype=np.float32)
+    return float(frame_min.min()), float(frame_max.max()), frame_min, frame_max
 
 
 def write_field_headers(f: BinaryIO, fields: Sequence[FieldBlock]):

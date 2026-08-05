@@ -131,6 +131,13 @@ namespace M2M.SIMBA
             linePlayer?.Pause();
         }
 
+        /// <summary>Riprende l'animazione dal tempo corrente.</summary>
+        public void Resume()
+        {
+            shellAnimator?.Resume();
+            linePlayer?.Resume();
+        }
+
         public void Stop()
         {
             shellAnimator?.Stop();

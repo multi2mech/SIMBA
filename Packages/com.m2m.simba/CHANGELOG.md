@@ -1,12 +1,37 @@
 # Changelog
 
-## [1.1.0] - 2026-08-04
+## 1.2.0-test.2
 
-- Added SIMBA binary v4 with explicit static/dynamic topology mode.
-- Added variable connectivity support for ShellMesh and LineMesh.
-- Standardized v4 headers with `FrameStep` for both geometry types.
-- Kept backward compatibility with v3 static-topology files.
-- Fixed the LineMesh magic to the fixed-width `LNMSH004`.
+- Added SHMSH005 support to the Unity Editor binary-header reader.
+- Fixed the importer error: `Unsupported SIMBA magic 'SHMSH005'`.
+- Preserved runtime compatibility with SHMSH003, SHMSH004 and SHMSH005.
+- Kept one official ShellMesh Python converter.
+- Kept public `Pause()` and `Resume()` methods on SIMBAPlayer,
+  ShellMeshAnimator and LineMeshPlayer.
+
+
+## 1.2.0-test.1
+
+- Unified ShellMesh converter: one `shell_mesh_h5_to_fields.py`.
+- Legacy array-layout and Time_* HDF5 inputs supported by the same converter.
+- Removed duplicate `_v5` converter.
+- Added public `Pause()` and `Resume()` runtime controls.
+- Includes SHMSH005 streaming, offsets, cache, connectivity pool, delta/LZ4, Float16/Float32 and lazy fields.
+
+# Changelog
+
+## 1.2.0-experimental.1
+
+- Added experimental SHMSH005 streaming format.
+- Added frame flags and empty frames.
+- Added frame offsets and three-frame cache.
+- Added connectivity pool, delta encoding and LZ4 compression.
+- Added selectable Float16/Float32 vertices.
+- Added automatic UInt16/UInt32 connectivity delta width.
+- Added lazy field loading for ShellMesh v5.
+- Added native GraphicsBuffer / WebGL vertex-color automatic backend.
+
+# Changelog
 
 All notable changes to SIMBA are documented here.
 

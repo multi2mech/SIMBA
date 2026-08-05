@@ -19,7 +19,7 @@ namespace M2M.SIMBA
 
         private void Start()
         {
-            if (controller == null) controller = FindFirstObjectByType<FieldColorController>();
+            if (controller == null) controller = FindObjectOfType<FieldColorController>();
             if (controller == null) { Debug.LogError("FieldColorController non trovato.", this); return; }
             controller.FieldChanged += HandleControllerFieldChanged;
             RebuildOptions();

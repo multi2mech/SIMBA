@@ -13,17 +13,10 @@ namespace M2M.SIMBA
     public sealed class LineMeshPlayer : MonoBehaviour, IFieldAnimationSource
     {
         private static readonly byte[] MagicV3 =
-            Encoding.ASCII.GetBytes("LNMSH003");
+    Encoding.ASCII.GetBytes("LNMSH003");
 
-        private static readonly byte[] MagicV4 =
-            Encoding.ASCII.GetBytes("LNMSH004");
-
-        // Compatibility with early experimental exporters.
-        private static readonly byte[] LegacyMagicV3 =
-            Encoding.ASCII.GetBytes("LINEM003");
-
-        private static readonly byte[] LegacyMagicV4 =
-            Encoding.ASCII.GetBytes("LINEM004");
+private static readonly byte[] MagicV4 =
+    Encoding.ASCII.GetBytes("LNMSH004");
         [Header("Data")]
         public string fileName = "line_mesh_fields.bin";
         public bool loadOnStart = true;
@@ -144,6 +137,7 @@ namespace M2M.SIMBA
 
         public void Play() => IsPlaying = true;
         public void Pause() => IsPlaying = false;
+        public void Resume() => IsPlaying = true;
 
         public void Stop()
         {
@@ -188,17 +182,11 @@ namespace M2M.SIMBA
 
             byte[] magic = reader.ReadBytes(8);
 
-            if (Equal(magic, MagicV3) ||
-                Equal(magic, LegacyMagicV3))
-            {
+            if (Equal(magic, MagicV3))
                 return ParseV3(reader);
-            }
 
-            if (Equal(magic, MagicV4) ||
-                Equal(magic, LegacyMagicV4))
-            {
+            if (Equal(magic, MagicV4))
                 return ParseV4(reader);
-            }
 
             throw new InvalidDataException(
                 "Magic SIMBA LineMesh non valido.");
@@ -833,6 +821,9 @@ namespace M2M.SIMBA
 
         public AnimatedField GetField(int index) =>
             expandedFields[index];
+
+        public float[] GetFieldValues(int fieldIndex, int frame) =>
+            expandedFields[fieldIndex].Values[frame];
 
         public int FindField(string name)
         {

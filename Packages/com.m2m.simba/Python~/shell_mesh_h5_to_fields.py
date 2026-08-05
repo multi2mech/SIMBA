@@ -1,265 +1,483 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import struct
 from pathlib import Path
 
 import h5py
+import lz4.block
 import numpy as np
 
 from field_export_common import (
     FieldBlock,
-    TopologyMode,
-    choose_topology_mode,
     radius_field,
     sanitize_field,
     sanitize_scalar_frame,
-    write_field_headers,
-    write_field_ranges,
+    write_string,
+    field_stats,
 )
 
-MAGIC = b'SHMSH004'
-VERSION = 4
+MAGIC = b"SHMSH005"
+VERSION = 5
 GEOMETRY_TYPE = 0
-VERTEX_CANDIDATES = ('Nodes', 'Vertices', 'Coordinates', 'Positions')
-TOPOLOGY_CANDIDATES = ('Connectivity', 'Triangles', 'Elements', 'Faces')
 
+FEATURE_EMPTY_FRAMES = 1 << 0
+FEATURE_FRAME_OFFSETS = 1 << 1
+FEATURE_CONNECTIVITY_POOL = 1 << 2
+FEATURE_LZ4_CONNECTIVITY = 1 << 3
+FEATURE_DELTA_CONNECTIVITY = 1 << 4
+FEATURE_LAZY_FIELDS = 1 << 5
 
-def time_number(key: str) -> int:
-    match = re.findall(r'\d+', key)
-    return int(match[0]) if match else 0
+FRAME_EMPTY = 1 << 0
+
+VERTEX_CANDIDATES = ("Nodes", "Vertices", "Coordinates", "Positions")
+TOPOLOGY_CANDIDATES = ("Connectivity", "Triangles", "Elements", "Faces")
 
 
 def datasets(h5):
-    out = {}
-    h5.visititems(lambda name, obj: out.__setitem__(name, obj) if isinstance(obj, h5py.Dataset) else None)
-    return out
+    result = {}
+    h5.visititems(
+        lambda name, obj: result.__setitem__(name, obj)
+        if isinstance(obj, h5py.Dataset) else None
+    )
+    return result
 
 
-def find(ds, names):
+def find_any_dataset(ds, names):
     for candidate in names:
         for name, obj in ds.items():
-            if name.split('/')[-1].lower() == candidate.lower():
-                return name, obj
-    raise KeyError(f'Dataset not found: {names}')
-
-
-def find_optional_in_group(group, target):
-    for name, obj in group.items():
-        if isinstance(obj, h5py.Dataset) and name.lower() == target.lower():
-            return obj
+            if name.split("/")[-1].lower() == candidate.lower():
+                return obj
     return None
 
 
-def vertices_shape(a):
-    a = np.asarray(a)
-    if a.ndim == 2:
-        if a.shape[-1] != 3 and a.shape[0] == 3:
-            a = a.T
-        a = a[None]
-    elif a.ndim == 3 and a.shape[-1] != 3:
-        if a.shape[1] == 3:
-            a = np.transpose(a, (2, 0, 1))
-        elif a.shape[0] == 3:
-            a = np.transpose(a, (2, 1, 0))
-    if a.ndim != 3 or a.shape[-1] != 3:
-        raise ValueError(f'Unsupported vertices shape {a.shape}')
-    return np.asarray(a, dtype=np.float32)
+def normalize_vertices_array(value):
+    array = np.asarray(value)
+    if array.ndim == 2:
+        if array.shape[-1] != 3 and array.shape[0] == 3:
+            array = array.T
+        array = array[None]
+    elif array.ndim == 3 and array.shape[-1] != 3:
+        if array.shape[1] == 3:
+            array = np.transpose(array, (2, 0, 1))
+        elif array.shape[0] == 3:
+            array = np.transpose(array, (2, 1, 0))
+    if array.ndim != 3 or array.shape[-1] != 3:
+        raise ValueError(f"Unsupported vertices shape {array.shape}")
+    return np.asarray(array, dtype=np.float32)
 
 
-def triangles_shape(connectivity, node_count):
-    conn = np.asarray(connectivity, dtype=np.int32)
-
-    if conn.size == 0:
-        return np.empty((0, 3), dtype=np.int32)
-
-    if conn.ndim != 2 or conn.shape[1] != 3:
-        raise ValueError(...)
-
-    if conn.min() < 0 or conn.max() >= node_count:
-        raise ValueError("Triangle connectivity out of range")
-
-    return conn
-
-
-def load_group_layout(h5, requested_fields):
+def load_hdf5(h5, requested):
     keys = sorted(
-        [name for name, obj in h5.items() if isinstance(obj, h5py.Group) and name.startswith('Time_')],
+        [key for key, value in h5.items()
+         if isinstance(value, h5py.Group) and key.startswith("Time_")],
         key=time_number,
     )
-    if not keys:
-        return None
+    if keys:
+        vertices = []
+        triangles = []
+        raw_fields = {name: [] for name in requested}
+        for key in keys:
+            group = h5[key]
+            node_ds = find_dataset(group, VERTEX_CANDIDATES)
+            triangle_ds = find_dataset(group, TOPOLOGY_CANDIDATES)
+            if node_ds is None or triangle_ds is None:
+                raise KeyError(f"{key}: Nodes/Connectivity missing")
+            frame_vertices = normalize_nodes(node_ds[...])
+            frame_triangles = normalize_triangles(triangle_ds[...], len(frame_vertices))
+            vertices.append(frame_vertices)
+            triangles.append(frame_triangles)
+            for name in list(raw_fields):
+                dataset = find_dataset(group, (name,))
+                if dataset is None:
+                    raw_fields.pop(name, None)
+                    print(f"WARNING: field {name} not found in every frame", flush=True)
+                else:
+                    raw_fields[name].append(
+                        sanitize_scalar_frame(dataset[...], len(frame_vertices), name)
+                    )
+        fields = [FieldBlock(name, "", values) for name, values in raw_fields.items()]
+        return vertices, triangles, fields
 
-    vertices = []
-    triangles = []
-    raw_fields = {name: [] for name in requested_fields if name.lower() != 'radius'}
-
-    for key in keys:
-        group = h5[key]
-        node_ds = find_optional_in_group(group, 'Nodes') or find_optional_in_group(group, 'Vertices')
-        if node_ds is None:
-            raise KeyError(f'{key}: Nodes/Vertices missing')
-        frame_vertices = vertices_shape(node_ds[...])[0]
-
-        conn_ds = None
-        for name in TOPOLOGY_CANDIDATES:
-            conn_ds = find_optional_in_group(group, name)
-            if conn_ds is not None:
-                break
-        if conn_ds is None:
-            for name in TOPOLOGY_CANDIDATES:
-                if name in h5 and isinstance(h5[name], h5py.Dataset):
-                    conn_ds = h5[name]
-                    break
-        if conn_ds is None:
-            raise KeyError(f'{key}: connectivity missing')
-
-        vertices.append(frame_vertices)
-        triangles.append(triangles_shape(conn_ds[...], len(frame_vertices)))
-        for name in list(raw_fields):
-            ds = find_optional_in_group(group, name)
-            if ds is None:
-                raw_fields.pop(name, None)
-                print(f'WARNING: field {name} not found in every frame', flush=True)
-            else:
-                raw_fields[name].append(sanitize_scalar_frame(ds[...], len(frame_vertices), name))
-
-    fields = [FieldBlock(name, '', values) for name, values in raw_fields.items()]
-    return vertices, triangles, fields, keys
-
-
-def load_array_layout(h5, requested_fields):
     ds = datasets(h5)
-    _, vertex_ds = find(ds, VERTEX_CANDIDATES)
-    _, topology_ds = find(ds, TOPOLOGY_CANDIDATES)
-    vertices_array = vertices_shape(vertex_ds[...])
-    vertices = [np.ascontiguousarray(frame, dtype=np.float32) for frame in vertices_array]
-
-    raw_conn = np.asarray(topology_ds[...])
-    if raw_conn.ndim == 2:
-        one = triangles_shape(raw_conn, len(vertices[0]))
+    vertex_ds = find_any_dataset(ds, VERTEX_CANDIDATES)
+    topology_ds = find_any_dataset(ds, TOPOLOGY_CANDIDATES)
+    if vertex_ds is None or topology_ds is None:
+        raise KeyError("Legacy HDF5: vertices/connectivity dataset not found")
+    vertex_array = normalize_vertices_array(vertex_ds[...])
+    vertices = [np.ascontiguousarray(frame, dtype=np.float32) for frame in vertex_array]
+    raw_connectivity = np.asarray(topology_ds[...])
+    if raw_connectivity.ndim == 2:
+        one = normalize_triangles(raw_connectivity, len(vertices[0]))
         triangles = [one.copy() for _ in vertices]
-    elif raw_conn.ndim == 3:
-        if raw_conn.shape[0] != len(vertices):
-            raise ValueError(f'Connectivity has {raw_conn.shape[0]} frames, vertices have {len(vertices)}')
-        triangles = [triangles_shape(raw_conn[i], len(vertices[i])) for i in range(len(vertices))]
+    elif raw_connectivity.ndim == 3:
+        if raw_connectivity.shape[0] != len(vertices):
+            raise ValueError("Legacy HDF5 connectivity/frame count mismatch")
+        triangles = [normalize_triangles(raw_connectivity[i], len(vertices[i]))
+                     for i in range(len(vertices))]
     else:
-        raise ValueError(f'Unsupported connectivity shape {raw_conn.shape}')
-
+        raise ValueError(f"Unsupported legacy connectivity shape {raw_connectivity.shape}")
     fields = []
-    for name in requested_fields:
-        if name.lower() == 'radius':
+    for name in requested:
+        dataset = find_any_dataset(ds, (name,))
+        if dataset is None:
+            print(f"WARNING: field {name} not found", flush=True)
             continue
-        obj = next((obj for path, obj in ds.items() if path.split('/')[-1].lower() == name.lower()), None)
-        if obj is None:
-            print(f'WARNING: field {name} not found', flush=True)
-            continue
-        if len({len(v) for v in vertices}) != 1:
-            raise ValueError(f'{name}: variable vertex counts require Time_* groups with one field dataset per frame')
-        values = sanitize_field(obj[...], len(vertices), len(vertices[0]), name)
-        fields.append(FieldBlock(name, '', values))
-    return vertices, triangles, fields, list(range(len(vertices)))
+        if len({len(frame) for frame in vertices}) != 1:
+            raise ValueError(f"{name}: variable vertex counts require Time_* groups")
+        values = sanitize_field(dataset[...], len(vertices), len(vertices[0]), name)
+        fields.append(FieldBlock(name, "", values))
+    return vertices, triangles, fields
+
+
+def time_number(key: str) -> int:
+    match = re.findall(r"\d+", key)
+    return int(match[0]) if match else 0
+
+
+def find_dataset(group, names):
+    for candidate in names:
+        for key, value in group.items():
+            if isinstance(value, h5py.Dataset) and key.lower() == candidate.lower():
+                return value
+    return None
+
+
+def normalize_nodes(value):
+    array = np.asarray(value, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError(f"Nodes shape {array.shape}, expected (n,3)")
+    if array.shape[1] != 3 and array.shape[0] == 3:
+        array = array.T
+    if array.shape[1] != 3:
+        raise ValueError(f"Nodes shape {array.shape}, expected (n,3)")
+    return np.ascontiguousarray(array, dtype=np.float32)
+
+
+def normalize_triangles(value, vertex_count):
+    array = np.asarray(value, dtype=np.int64)
+    if array.size == 0:
+        return np.empty((0, 3), dtype=np.int32)
+    if array.ndim != 2:
+        raise ValueError(f"Connectivity shape {array.shape}, expected (n,3)")
+    if array.shape[1] != 3 and array.shape[0] == 3:
+        array = array.T
+    if array.shape[1] != 3:
+        raise ValueError(f"Connectivity shape {array.shape}, expected (n,3)")
+    if array.min() == 1:
+        array = array - 1
+    if array.min() < 0 or array.max() >= vertex_count:
+        raise ValueError("Triangle connectivity out of range")
+    return np.ascontiguousarray(array, dtype=np.int32)
+
+
+def zigzag_encode(values):
+    values = np.asarray(values, dtype=np.int64)
+    return ((values << 1) ^ (values >> 63)).astype(np.uint64)
+
+def connectivity_fits_uint16(connectivity):
+    flat = np.asarray(connectivity, dtype=np.int64).reshape(-1)
+
+    if flat.size == 0:
+        return True
+
+    deltas = np.empty_like(flat)
+    deltas[0] = flat[0]
+    deltas[1:] = flat[1:] - flat[:-1]
+
+    encoded = zigzag_encode(deltas)
+
+    return (
+        encoded.size == 0
+        or encoded.max() <= np.iinfo(np.uint16).max
+    )
+def encode_connectivity(connectivity, index_format):
+    flat = np.asarray(connectivity, dtype=np.int64).reshape(-1)
+    if flat.size == 0:
+        raw = b""
+    else:
+        deltas = np.empty_like(flat)
+        deltas[0] = flat[0]
+        deltas[1:] = flat[1:] - flat[:-1]
+        encoded = zigzag_encode(deltas)
+
+        if index_format == 0:
+            if encoded.size and encoded.max() > np.iinfo(np.uint16).max:
+                raise ValueError(
+                    "Internal error: uint16 selected for connectivity "
+                    "that requires uint32."
+                )
+
+            raw = encoded.astype("<u2", copy=False).tobytes()
+        else:
+            if encoded.size and encoded.max() > np.iinfo(np.uint32).max:
+                raise ValueError("Delta connectivity exceeds uint32.")
+            raw = encoded.astype("<u4", copy=False).tobytes()
+
+    compressed = lz4.block.compress(raw, store_size=False)
+    return len(flat), len(raw), compressed
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--input', required=True)
-    ap.add_argument('--output', required=True)
-    ap.add_argument('--fields', nargs='*', default=[])
-    ap.add_argument('--fps', type=float, default=30.0)
-    ap.add_argument('--frame-step', type=int, default=1)
-    ap.add_argument('--scale', type=float, default=1.0)
-    ap.add_argument('--no-swap-yz', action='store_true')
-    ap.add_argument('--add-radius', action='store_true')
-    ap.add_argument('--topology-mode', choices=('auto', 'static', 'dynamic'), default='auto')
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--fields", nargs="*", default=[])
+    parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument("--frame-step", type=int, default=1)
+    parser.add_argument("--scale", type=float, default=1.0)
+    parser.add_argument("--no-swap-yz", action="store_true")
+    parser.add_argument("--add-radius", action="store_true")
+    parser.add_argument(
+        "--vertex-format",
+        choices=("float16", "float32"),
+        default="float32",
+    )
+    parser.add_argument(
+        "--index-format",
+        choices=("auto", "uint16", "uint32"),
+        default="auto",
+    )
+    args = parser.parse_args()
 
-    input_path = Path(args.input)
-    output = Path(args.output)
-    requested = [name for name in args.fields if name.lower() != 'radius']
+    requested = [
+        name for name in args.fields
+        if name.lower() != "radius"
+    ]
 
-    with h5py.File(input_path, 'r') as h5:
-        loaded = load_group_layout(h5, requested)
-        if loaded is None:
-            loaded = load_array_layout(h5, requested)
-        vertices, triangles, fields, source_keys = loaded
+    with h5py.File(args.input, "r") as h5:
+        vertices, triangles, fields = load_hdf5(h5, requested)
 
     step = max(1, args.frame_step)
     selected = list(range(0, len(vertices), step))
-    if not selected:
-        raise RuntimeError('No frames selected')
+    if selected[-1] != len(vertices) - 1:
+        selected.append(len(vertices) - 1)
+
     vertices = [vertices[i] for i in selected]
     triangles = [triangles[i] for i in selected]
-    fields = [FieldBlock(f.name, f.units, [f.frames()[i] for i in selected]) for f in fields]
 
     converted = []
     converted_triangles = []
-    for points, conn in zip(vertices, triangles):
-        p = points[:, [0, 2, 1]] if not args.no_swap_yz else points.copy()
-        t = conn[:, [0, 2, 1]] if not args.no_swap_yz else conn.copy()
-        converted.append(np.ascontiguousarray(p * np.float32(args.scale), dtype=np.float32))
-        converted_triangles.append(np.ascontiguousarray(t, dtype=np.int32))
+    for points, connectivity in zip(vertices, triangles):
+        p = (
+            points[:, [0, 2, 1]]
+            if not args.no_swap_yz
+            else points.copy()
+        )
+        t = (
+            connectivity[:, [0, 2, 1]]
+            if not args.no_swap_yz
+            else connectivity.copy()
+        )
+        converted.append(
+            np.ascontiguousarray(
+                p * np.float32(args.scale),
+                dtype=np.float32,
+            )
+        )
+        converted_triangles.append(
+            np.ascontiguousarray(t, dtype=np.int32)
+        )
 
-    if args.add_radius or any(name.lower() == 'radius' for name in args.fields) or not fields:
+    fields = [
+        FieldBlock(
+            field.name,
+            field.units,
+            [field.frames()[i] for i in selected],
+        )
+        for field in fields
+    ]
+
+    if args.add_radius or any(name.lower() == "radius" for name in args.fields) or not fields:
         radius = radius_field(vertices)
-        radius = [np.ascontiguousarray(v * np.float32(args.scale), dtype=np.float32) for v in radius]
-        fields.append(FieldBlock('Radius', 'm', radius))
+        radius = [
+            np.ascontiguousarray(
+                value * np.float32(args.scale),
+                dtype=np.float32,
+            )
+            for value in radius
+        ]
+        fields.append(FieldBlock("Radius", "m", radius))
 
-    unique = {}
-    for field in fields:
-        unique.setdefault(field.name.lower(), field)
-    fields = list(unique.values())
+    vertex_format = 1 if args.vertex_format == "float16" else 0
 
-    for field in fields:
-        frames = field.frames()
-        if len(frames) != len(converted):
-            raise ValueError(f'{field.name}: frame count mismatch')
-        for i, values in enumerate(frames):
-            if len(values) != len(converted[i]):
-                raise ValueError(f'{field.name}, frame {i}: {len(values)} values for {len(converted[i])} vertices')
+    max_vertex_count = max(len(frame) for frame in converted)
+    max_triangle_count = max(
+        len(frame) for frame in converted_triangles
+    )
 
-    mode = choose_topology_mode(args.topology_mode, converted_triangles)
-    max_vertices = max(len(v) for v in converted)
-    max_triangles = max(len(t) for t in converted_triangles)
+    if args.index_format == "uint32":
+        index_format = 1
 
+    elif args.index_format == "uint16":
+        all_fit_uint16 = all(
+            connectivity_fits_uint16(connectivity)
+            for connectivity in converted_triangles
+        )
+
+        if all_fit_uint16:
+            index_format = 0
+        else:
+            print(
+                "WARNING: requested uint16, but delta connectivity "
+                "does not fit. Falling back to uint32.",
+                flush=True,
+            )
+            index_format = 1
+
+    else:
+        all_fit_uint16 = (
+            max_vertex_count <= 65535
+            and all(
+                connectivity_fits_uint16(connectivity)
+                for connectivity in converted_triangles
+            )
+        )
+
+        index_format = 0 if all_fit_uint16 else 1
+
+        if index_format == 1:
+            print(
+                "Connectivity requires uint32 "
+                "(vertex count or delta range exceeds uint16).",
+                flush=True,
+            )
+
+    # Deduplicate connectivity by exact byte identity.
+    pool = []
+    pool_lookup = {}
+    frame_connectivity_ids = []
+
+    for connectivity in converted_triangles:
+        key = hashlib.sha256(
+            np.asarray(connectivity, dtype="<i4").tobytes()
+        ).digest()
+
+        existing = pool_lookup.get(key)
+        if existing is not None and np.array_equal(
+            pool[existing],
+            connectivity,
+        ):
+            frame_connectivity_ids.append(existing)
+            continue
+
+        pool_id = len(pool)
+        pool_lookup[key] = pool_id
+        pool.append(connectivity)
+        frame_connectivity_ids.append(pool_id)
+
+    encoded_pool = [
+        encode_connectivity(connectivity, index_format)
+        for connectivity in pool
+    ]
+
+    stats = [field_stats(field) for field in fields]
+
+    features = (
+        FEATURE_EMPTY_FRAMES
+        | FEATURE_FRAME_OFFSETS
+        | FEATURE_CONNECTIVITY_POOL
+        | FEATURE_LZ4_CONNECTIVITY
+        | FEATURE_DELTA_CONNECTIVITY
+        | FEATURE_LAZY_FIELDS
+    )
+
+    output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open('wb') as f:
-        f.write(MAGIC)
-        f.write(struct.pack(
-            '<iiiiiifii',
-            VERSION,
-            GEOMETRY_TYPE,
-            int(mode),
-            len(converted),
-            max_vertices,
-            max_triangles,
-            args.fps,
-            step,
-            len(fields),
-        ))
-        stats = write_field_headers(f, fields)
-        write_field_ranges(f, stats)
+
+    with output.open("wb") as file:
+        file.write(MAGIC)
+        file.write(
+            struct.pack(
+                "<iiIifiBBHiii",
+                VERSION,
+                GEOMETRY_TYPE,
+                features,
+                len(converted),
+                args.fps,
+                step,
+                vertex_format,
+                index_format,
+                0,
+                max_vertex_count,
+                max_triangle_count,
+                len(fields),
+            )
+        )
+
+        for field, stat in zip(fields, stats):
+            global_min, global_max, frame_min, frame_max = stat
+            write_string(file, field.name)
+            write_string(file, field.units)
+            file.write(
+                struct.pack("<ff", global_min, global_max)
+            )
+            np.asarray(frame_min, dtype="<f4").tofile(file)
+            np.asarray(frame_max, dtype="<f4").tofile(file)
+
+        file.write(struct.pack("<i", len(encoded_pool)))
+        for index_count, decoded_bytes, compressed in encoded_pool:
+            file.write(
+                struct.pack(
+                    "<iii",
+                    index_count,
+                    decoded_bytes,
+                    len(compressed),
+                )
+            )
+            file.write(compressed)
+
+        offsets_position = file.tell()
+        file.write(b"\x00" * (8 * len(converted)))
+        frame_offsets = []
 
         field_frames = [field.frames() for field in fields]
-        if mode == TopologyMode.STATIC:
-            np.asarray(converted_triangles[0], dtype='<i4').tofile(f)
-            for frame in range(len(converted)):
-                np.asarray(converted[frame], dtype='<f4').tofile(f)
-                for values in field_frames:
-                    np.asarray(values[frame], dtype='<f4').tofile(f)
-        else:
-            for frame in range(len(converted)):
-                f.write(struct.pack('<ii', len(converted[frame]), len(converted_triangles[frame])))
-                np.asarray(converted[frame], dtype='<f4').tofile(f)
-                np.asarray(converted_triangles[frame], dtype='<i4').tofile(f)
-                for values in field_frames:
-                    np.asarray(values[frame], dtype='<f4').tofile(f)
 
-    print(f'Created {output}', flush=True)
-    print(f'Topology: {mode.name.lower()}', flush=True)
-    print('Fields: ' + ', '.join(field.name for field in fields), flush=True)
+        for frame_index, points in enumerate(converted):
+            frame_offsets.append(file.tell())
+            connectivity = converted_triangles[frame_index]
+            empty = len(points) == 0 or len(connectivity) == 0
+            flags = FRAME_EMPTY if empty else 0
+
+            file.write(
+                struct.pack(
+                    "<Bii",
+                    flags,
+                    len(points),
+                    frame_connectivity_ids[frame_index],
+                )
+            )
+
+            if empty:
+                continue
+
+            if vertex_format == 0:
+                np.asarray(points, dtype="<f4").tofile(file)
+            else:
+                np.asarray(points, dtype="<f2").tofile(file)
+
+            for values in field_frames:
+                np.asarray(
+                    values[frame_index],
+                    dtype="<f4",
+                ).tofile(file)
+
+        end_position = file.tell()
+        file.seek(offsets_position)
+        np.asarray(frame_offsets, dtype="<i8").tofile(file)
+        file.seek(end_position)
+
+    print(f"Created {output}", flush=True)
+    print(
+        f"Frames={len(converted)}, "
+        f"connectivity pool={len(pool)}, "
+        f"vertex format={args.vertex_format}, "
+        f"index format={'uint16' if index_format == 0 else 'uint32'}",
+        flush=True,
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

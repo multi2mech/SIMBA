@@ -16,6 +16,7 @@ namespace M2M.SIMBA
         event Action DataLoaded;
         event Action<int, int, float> FrameChanged;
         AnimatedField GetField(int index);
+        float[] GetFieldValues(int fieldIndex, int frame);
         int FindField(string fieldName);
     }
 }
